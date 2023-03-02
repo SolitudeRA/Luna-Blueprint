@@ -1,0 +1,338 @@
+version : "3.8"
+
+services:
+  observer-fluent-bit   :
+    container_name: observer-fluent-bit
+    image         : fluent/fluent-bit:latest
+    tty           : true
+    restart       : on-failure
+    command       : "/fluent-bit/bin/fluent-bit -c /config-fluent-bit"
+    configs       :
+      - config-fluent-bit
+    depends_on    :
+      observer-loki:
+        condition: service_started
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.2
+
+  observer-loki         :
+    container_name: observer-loki
+    image         : grafana/loki:latest
+    tty           : true
+    restart       : on-failure
+    command       : "-config.file=/config-loki"
+    configs       :
+      - config-loki
+    volumes       :
+      - /var/luna/logging/loki:/loki
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.3
+
+  observer-grafana      :
+    container_name: observer-grafana
+    image         : grafana/grafana-oss
+    user          : root
+    restart       : always
+    ports         :
+      - "9070:3000"
+    depends_on    :
+      observer-fluent-bit:
+        condition: service_started
+    environment   :
+      GF_AUTH_ANONYMOUS_ENABLED : "true"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+    volumes       :
+      - /var/luna/logging/grafana:/var/lib/grafana
+      - ./observer/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.4
+
+  database-adminer      :
+    container_name: database-adminer
+    image         : adminer:latest
+    restart       : always
+    ports         :
+      - "9071:8080"
+    depends_on    :
+      database-mysql:
+        condition: service_healthy
+    volumes       :
+      - ./database/interface/adminer.css:/var/www/html/adminer.css:ro
+    networks      :
+      network-database:
+        ipv4_address: 172.27.1.2
+
+  database-mysql        :
+    container_name: database-mysql
+    image         : mysql:8.0-debian
+    tty           : true
+    restart       : always
+    depends_on    :
+      observer-fluent-bit:
+        condition: service_started
+    secrets       :
+      - source: secret-database-mysql-root-password
+        uid   : "999"
+      - source: secret-database-mysql-wordpress-dbname
+        uid   : "999"
+      - source: secret-database-mysql-wordpress-user
+        uid   : "999"
+      - source: secret-database-mysql-wordpress-password
+        uid   : "999"
+      - source: secret-database-mysql-nextcloud-dbname
+        uid   : "999"
+      - source: secret-database-mysql-nextcloud-user
+        uid   : "999"
+      - source: secret-database-mysql-nextcloud-password
+        uid   : "999"
+      - source: secret-database-mysql-postfixadmin-dbname
+        uid   : "999"
+      - source: secret-database-mysql-postfixadmin-user
+        uid   : "999"
+      - source: secret-database-mysql-postfixadmin-password
+        uid   : "999"
+    environment   :
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes       :
+      - /var/luna/database:/var/lib/mysql
+      - ./database/initialize:/docker-entrypoint-initdb.d
+    healthcheck   :
+      test    : [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
+      interval: 20s
+      timeout : 10s
+      retries : 10
+    logging       :
+      driver : "fluentd"
+      options:
+        fluentd-address      : "172.27.0.2:24224"
+        fluentd-async-connect: "true"
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.5
+      network-database:
+        ipv4_address: 172.27.1.3
+
+  database-redis        :
+    container_name: database-redis
+    image         : redis:6.2.5-alpine
+    tty           : true
+    restart       : always
+    depends_on    :
+      observer-fluent-bit:
+        condition: service_started
+    volumes       :
+      - /var/luna/database:/data
+    healthcheck   :
+      test    : [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      interval: 20s
+      timeout : 10s
+      retries : 10
+    logging       :
+      driver : "fluentd"
+      options:
+        fluentd-address      : "172.27.0.2:24224"
+        fluentd-async-connect: "true"
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.6
+      network-database:
+        ipv4_address: 172.27.1.4
+
+  service-wordpress     :
+    container_name: service-wordpress
+    image         : wordpress:latest
+    tty           : true
+    restart       : always
+    ports         :
+      - "9072:80"
+    depends_on    :
+      observer-fluent-bit:
+        condition: service_started
+      database-mysql     :
+        condition: service_healthy
+      database-redis     :
+        condition: service_healthy
+    environment   :
+      WORDPRESS_DB_HOST    : database-mysql
+      WORDPRESS_DB_NAME    : ${WORDPRESS_DB_NAME}
+      WORDPRESS_DB_USER    : ${WORDPRESS_DB_USER}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+    volumes       :
+      - /var/luna/service/wordpress/home:/var/www/html
+    logging       :
+      driver : "fluentd"
+      options:
+        fluentd-address      : "172.27.0.2:24224"
+        fluentd-async-connect: "true"
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.7
+      network-database:
+        ipv4_address: 172.27.1.5
+
+  service-nextcloud     :
+    container_name: service-nextcloud
+    image         : nextcloud:production
+    tty           : true
+    restart       : always
+    ports         :
+      - "9073:80"
+    depends_on    :
+      observer-fluent-bit:
+        condition: service_started
+      database-mysql     :
+        condition: service_healthy
+      database-redis     :
+        condition: service_healthy
+    environment   :
+      MYSQL_HOST               : database-mysql
+      MYSQL_DATABASE           : ${NEXTCLOUD_DB_NAME}
+      MYSQL_USER               : ${NEXTCLOUD_DB_USER}
+      MYSQL_PASSWORD           : ${NEXTCLOUD_DB_PASSWORD}
+      REDIS_HOST               : database-redis
+      NEXTCLOUD_ADMIN_USER     : ${NEXTCLOUD_ADMIN_USER}
+      NEXTCLOUD_ADMIN_PASSWORD : ${NEXTCLOUD_ADMIN_PASSWORD}
+      TRUSTED_PROXIES          : ${NEXTCLOUD_TRUSTED_PROXIES}
+      OVERWRITEPROTOCOL        : https
+      OVERWRITECLIURL          : https://${NEXTCLOUD_TRUSTED_DOMAINS}
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_TRUSTED_DOMAINS}
+    volumes       :
+      - /var/luna/service/nextcloud/home:/var/www/html
+    logging       :
+      driver : "fluentd"
+      options:
+        fluentd-address      : "172.27.0.2:24224"
+        fluentd-async-connect: "true"
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.8
+      network-database:
+        ipv4_address: 172.27.1.6
+
+  service-nextcloud-cron:
+    container_name: service-nextcloud-cron
+    image         : nextcloud:production
+    restart       : always
+    entrypoint    : /cron.sh
+    depends_on    :
+      service-nextcloud:
+        condition: service_started
+    volumes       :
+      - /var/luna/service/nextcloud/home:/var/www/html
+    logging       :
+      driver : "fluentd"
+      options:
+        fluentd-address      : "172.27.0.2:24224"
+        fluentd-async-connect: "true"
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.9
+
+  service-jenkins       :
+    container_name: service-jenkins
+    image         : jenkins/jenkins:lts-jdk11
+    user          : root
+    tty           : true
+    restart       : on-failure
+    ports         :
+      - "9075:8080"
+      - "50000:50000"
+    depends_on    :
+      observer-fluent-bit:
+        condition: service_started
+    volumes       :
+      - /var/luna/service/jenkins/home:/var/jenkins_home
+    logging       :
+      driver : "fluentd"
+      options:
+        fluentd-address      : "172.27.0.2:24224"
+        fluentd-async-connect: "true"
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.10
+
+  service-postfixadmin  :
+    container_name: service-postfixadmin
+    image         : postfixadmin:latest
+    tty           : true
+    restart       : always
+    ports         :
+      - "9076:80"
+    depends_on    :
+      observer-fluent-bit:
+        condition: service_started
+      database-mysql     :
+        condition: service_healthy
+    environment   :
+      POSTFIXADMIN_DB_TYPE    : mysqli
+      POSTFIXADMIN_DB_HOST    : database-mysql
+      POSTFIXADMIN_DB_NAME    : ${POSTFIXADMIN_DB_NAME}
+      POSTFIXADMIN_DB_USER    : ${POSTFIXADMIN_DB_USER}
+      POSTFIXADMIN_DB_PASSWORD: ${POSTFIXADMIN_DB_PASSWORD}
+    volumes       :
+      - /var/luna/service/postfixadmin/home:/var/www/html
+    logging       :
+      driver : "fluentd"
+      options:
+        fluentd-address      : "172.27.2.72:24224"
+        fluentd-async-connect: "true"
+    networks      :
+      network-observer:
+        ipv4_address: 172.27.0.11
+      network-database:
+        ipv4_address: 172.27.1.7
+
+# @formatter:off
+configs :
+  config-fluent-bit:
+    file: ./observer/fluent-bit/config.conf
+  config-loki:
+    file: ./observer/loki/config.yaml
+
+# noinspection ComposeUnknownKeys
+secrets :
+  secret-database-mysql-root-password:
+    environment: "MYSQL_ROOT_PASSWORD"
+  secret-database-mysql-wordpress-dbname:
+    environment: "WORDPRESS_DB_NAME"
+  secret-database-mysql-wordpress-user:
+    environment: "WORDPRESS_DB_USER"
+  secret-database-mysql-wordpress-password:
+    environment: "WORDPRESS_DB_PASSWORD"
+  secret-database-mysql-nextcloud-dbname:
+    environment: "NEXTCLOUD_DB_NAME"
+  secret-database-mysql-nextcloud-user:
+    environment: "NEXTCLOUD_DB_USER"
+  secret-database-mysql-nextcloud-password:
+    environment: "NEXTCLOUD_DB_PASSWORD"
+  secret-database-mysql-postfixadmin-dbname:
+    environment: "POSTFIXADMIN_DB_NAME"
+  secret-database-mysql-postfixadmin-user:
+    environment: "POSTFIXADMIN_DB_USER"
+  secret-database-mysql-postfixadmin-password:
+    environment: "POSTFIXADMIN_DB_PASSWORD"
+# @formatter:on
+
+networks:
+  network-observer:
+    name  : network-observer
+    driver: bridge
+    ipam  :
+      driver: default
+      config:
+        - subnet  : 172.27.0.0/24
+          ip_range: 172.27.0.0/24
+          gateway : 172.27.0.1
+  network-database:
+    name  : network-database
+    driver: bridge
+    ipam  :
+      driver: default
+      config:
+        - subnet  : 172.27.1.0/24
+          ip_range: 172.27.1.0/24
+          gateway : 172.27.1.1
